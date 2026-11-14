@@ -12,6 +12,14 @@
 > `transition` in service calls, and the `default_transition` option (seconds,
 > default 0 = instant) applies when a call gives none, e.g. from Alexa or a
 > dashboard. Effects are not faded.
+>
+> It also adds per-LED control: the `ideal_led.set_pixels` entity service paints
+> individual LEDs or ranges using the controller's bulk paint ("collections")
+> protocol. The painted frame is part of the enforced state: it is restored
+> after a restart and re-asserted on resends instead of a solid colour.
+> Patterns saved with `ideal_led.save_pattern` appear in the effect list as
+> `Pattern: <name>`, so scenes, automations and the effect dropdown can address
+> them by name.
 
 # iDeal LED control
 
@@ -29,6 +37,7 @@ Devices are coming on to the market which report as IDL or ISP lights but which 
 - Set brightness
 - Set effect & effect speed
 - Bulk paint entire strip using collections feature
+- Individual LED control via the `ideal_led.set_pixels` Home Assistant service
 - Automatic discovery of supported devices in Home Assistant
 
 ## Not supported
@@ -51,6 +60,91 @@ Add this repo to HACS as a custom repo. Click through:
 - The repo should show up in HACS as a new integration.  Click on it and choose `DOWNLOAD`.
 - Restart Home Assistant
 - iDeal LED devices should start to appear in your Integrations page
+
+### Per-LED control (`set_pixels`)
+
+The integration registers an entity service, `ideal_led.set_pixels`, which paints
+individual LEDs or LED ranges using the controller's bulk paint ("collections")
+protocol. Colours are reduced to 5 bits per channel internally, to protect the
+controller's voltage regulator. The call returns immediately; the BLE transfer
+runs in the background like other commands, and the painted frame is remembered,
+restored across restarts and re-asserted by the state enforcer.
+
+```yaml
+service: ideal_led.set_pixels
+target:
+  entity_id: light.my_ideal_led
+data:
+  pixel_count: 100 # optional, only needed if your strip has a different LED count
+  pixels:
+    - { from: 0,  to: 24, color: [255, 0, 0] }
+    - { from: 25, to: 49, color: [0, 255, 0] }
+    - { from: 50, to: 99, color: [0, 0, 255] }
+```
+
+- `pixels`: list of ranges. `from` is the first LED (0-based), `to` the last
+  (inclusive, defaults to `from`), `color` is `[r, g, b]` (0-255). A single LED
+  can be given as `{ led: 42, color: [255, 0, 0] }`. LEDs that are not named
+  keep their previously painted colour; the whole frame is re-sent on every
+  call.
+- `mode`: `solid` (default), `fade` or `flash`.
+- `speed`: 1-100, used by `fade` and `flash`.
+- `rle`: compress runs of identical colours into a single collection (default,
+  much faster). Set to `false` if your strip shows unexpected colours.
+- The current frame is exposed as the `pixels` attribute (plus `pixel_count`,
+  `pixel_mode`, `pixel_speed`, `pixel_rle`, `pixel_active`) so it is restored
+  across restarts. A paint applied via `set_pixels` is anonymous: while it is
+  showing it is restored and re-asserted like any state, but it is not
+  addressable through the effect dropdown or scenes. Save it as a pattern
+  (below) to give it a name.
+
+### Named patterns: scenes and the UI dropdown
+
+Pixel patterns become addressable through **named patterns**: each pattern
+saved with `ideal_led.save_pattern` appears in the effect list as
+**`Pattern: <name>`**, alongside the controller's real effects. Scenes and
+automations capture the effect as a plain, readable string, which is the
+recommended way to capture and restore pixel patterns.
+
+```yaml
+service: ideal_led.save_pattern
+target:
+  entity_id: light.my_ideal_led
+data:
+  name: Advent
+  pixels:
+    - { from: 0, to: 24, color: [120, 10, 0] }
+  mode: flash
+  speed: 40
+```
+
+- Without `pixels`, the currently painted framebuffer is saved.
+- Applying works like any effect: `light.turn_on` with `effect: "Pattern:
+  Advent"`, via the effect dropdown, or by capturing it in a scene.
+- The pattern registry persists across restarts (entity attribute) and is
+  per entity, so each strip has its own names.
+- While a named pattern is showing, the state effect stays the short name
+  (scenes capture `Pattern: Advent`, not technical data), and the state
+  enforcer re-asserts it on resends and after restarts.
+- Speed and brightness sliders act on a showing named pattern; speed changes
+  are written back into the saved pattern.
+- Re-applying the same scene is safe: a pattern that is already showing is
+  not repainted unless the brightness changed (repainting restarts
+  fade/flash animations; solid patterns don't visibly change).
+- Solid colours and controller effects deactivate the showing pattern;
+  re-apply the `Pattern: <name>` effect to bring it back.
+- A pattern's LED count is applied via a `LAMPN` packet when it differs from
+  the strip's current count.
+- Limits: max 20 patterns per strip, names up to 64 characters, 1-255 LEDs per
+  pattern. `delete_pattern` removes one; scenes still referencing it will
+  then log an error when applied.
+
+Notes:
+
+- The RLE compression (several LEDs in one collection) follows the protocol
+  notes but has not been verified on real hardware. `rle: false` reproduces the
+  exact, verified byte layout of the original demo script.
+- Bulk paint has only been verified on TYPE2 controllers.
 
 ## Other tools
 

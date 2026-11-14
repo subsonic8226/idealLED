@@ -1,6 +1,7 @@
 import asyncio
 
 # from datetime import datetime
+import json
 from homeassistant.components import bluetooth
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.components.light import ColorMode
@@ -87,6 +88,50 @@ SECRET_ENCRYPTION_KEY = bytes(
 DEFAULT_ATTEMPTS = 3
 BLEAK_BACKOFF_TIME = 0.25
 RETRY_BACKOFF_EXCEPTIONS = BleakDBusError
+
+# --- Pixel level control ("bulk paint" / collections protocol) -------------
+# Reverse engineered from the Android app, see att_protocol.md and
+# idealled_controller.py in the repository root.
+
+# Announces a bulk paint transfer. Byte 5 = number of colour data packets.
+DOOT_PACKET = bytearray.fromhex("04 44 4F 4F 54 01 00 00 00 00 00 00 00 00 00 00")
+# Sent once all colour data packets have been written ("complete").
+DOOTCP_PACKET = bytearray.fromhex("06 44 4F 4F 54 43 50 00 00 00 00 00 00 00 00 00")
+# Final commit of the bulk paint.
+DTARTCY_PACKET = bytearray.fromhex("08 44 54 41 52 54 43 59 01 00 00 00 00 00 00 00")
+# Tells the controller how many LEDs are on the string.
+LAMPN_PACKET = bytearray.fromhex("09 4C 41 4D 50 4E 00 32 00 32 00 00 00 00 00 00")
+
+# One colour data packet is [length, sequence, <collections>...] where each
+# collection is 7 bytes: 0x00, pixel count, red, green, blue, mode, speed.
+# The controller accepts at most 14 collections per colour data packet.
+MAX_COLLECTIONS_PER_PACKET = 14
+# Pixel modes understood by the DIY/graffiti feature of the controller.
+PIXEL_MODES = {"flash": 0, "fade": 1, "solid": 2}
+# Named patterns: short, meaningful effect names ("Pattern: Advent") that map
+# to stored pixel data. They appear in the effect dropdown alongside the
+# controller's real effects, so scenes and automations capture a plain,
+# readable effect string. The registry lives in the entity attributes so it
+# survives restarts.
+PATTERN_PREFIX = "Pattern: "
+MAX_PATTERN_NAME_LEN = 64
+MAX_PATTERNS = 20
+DEFAULT_PIXEL_COUNT = 100
+MAX_PIXEL_COUNT = 255
+
+
+def _pixels_from_hex(hexdata: str) -> list[tuple[int, int, int]]:
+    """Decode a string of rrggbb hex values (one per LED) into pixels."""
+    hexdata = str(hexdata).replace(",", "").strip()
+    if not hexdata or len(hexdata) % 6:
+        raise ValueError("Pattern payload must be rrggbb hex per LED")
+    count = len(hexdata) // 6
+    if count > MAX_PIXEL_COUNT:
+        raise ValueError(f"Pattern has {count} LEDs, max is {MAX_PIXEL_COUNT}")
+    return [
+        tuple(int(hexdata[i + j : i + j + 2], 16) for j in (0, 2, 4))
+        for i in range(0, len(hexdata), 6)
+    ]
 
 WrapFuncType = TypeVar("WrapFuncType", bound=Callable[..., Any])
 
@@ -211,6 +256,15 @@ class IDEALLEDInstance:
         self._firmware_version = fw_version
         self._model = self._detect_model()
         self._on_update_callbacks = []
+        # Pixel level ("bulk paint") state: one (r, g, b) tuple per LED. When
+        # _pixel_frame_state is set, a pattern is ACTIVE: the state enforcer
+        # re-asserts it (instead of a solid colour) on resends and restarts.
+        # Solid colours and controller effects clear it.
+        self._pixel_count = DEFAULT_PIXEL_COUNT
+        self._pixels = [(0, 0, 0)] * self._pixel_count
+        self._pixel_frame_state: dict | None = None
+        # Named patterns: name -> {"params": {...}, "pixels": [...]}
+        self._patterns: dict[str, dict] = {}
 
         LOGGER.debug(
             f"Model information for device {self.name} : ModelNo {self._model}. MAC: {self._mac}. Delay: {self._delay}"
@@ -334,7 +388,8 @@ class IDEALLEDInstance:
 
     @property
     def effect_list(self) -> list[str]:
-        return EFFECT_LIST
+        # The controller's real effects plus the user's saved named patterns.
+        return EFFECT_LIST + [PATTERN_PREFIX + name for name in sorted(self._patterns)]
 
     @property
     def effect(self):
@@ -344,6 +399,12 @@ class IDEALLEDInstance:
     def color_mode(self):
         return self._color_mode
 
+    def pattern_effect_name(self) -> str | None:
+        """The "Pattern: <name>" effect if one is currently showing, else None."""
+        if isinstance(self._effect, str) and self._effect.startswith(PATTERN_PREFIX):
+            return self._effect
+        return None
+
     async def set_brightness(self, brightness: int):
         LOGGER.debug("Brightness only requested: " + str(brightness))
         LOGGER.debug("Current brightness: " + str(self._brightness))
@@ -352,7 +413,15 @@ class IDEALLEDInstance:
         else:
             brightness = max(0, min(255, brightness))
             self._brightness = brightness
-            if self._effect is not None:
+            if self._pixel_frame_state is not None:
+                # A painted pattern is showing and brightness is baked into
+                # the pixel data, so repaint it at the new brightness,
+                # keeping the pattern name as the state effect.
+                await self.push_frame(
+                    **self._pixel_frame_state,
+                    effect_name=self.pattern_effect_name(),
+                )
+            elif self._effect is not None:
                 await self.set_effect(self._effect, brightness)
             else:
                 await self.set_rgb_color(self._hs_color, brightness)
@@ -373,6 +442,7 @@ class IDEALLEDInstance:
         LOGGER.debug("HS colour requested: %s", hs_col)
         self._effect = None
         self._color_mode = ColorMode.HS
+        self._pixel_frame_state = None  # a solid colour deactivates the pattern
         if brightness is None:
             LOGGER.debug(
                 "Brightness not specified, using current value: %s", self._brightness
@@ -426,12 +496,28 @@ class IDEALLEDInstance:
     @retry_bluetooth_connection_error
     # effect, reverse=0, speed=50, saturation=50, colour_data=COLOUR_DATA
     async def set_effect(self, effect: str, brightness: int | None = NotImplemented):
+        if effect.startswith(PATTERN_PREFIX):
+            # Named pattern: look it up in the registry and paint it. The
+            # state effect stays the short, meaningful name, so scenes
+            # capture "Pattern: <name>" instead of technical data.
+            name = effect[len(PATTERN_PREFIX):]
+            entry = self._patterns.get(name)
+            if entry is None:
+                raise ValueError(f"Unknown pattern: {name}")
+            if len(entry["pixels"]) != self._pixel_count:
+                await self.set_pixel_count(len(entry["pixels"]))
+            if brightness is not None and brightness is not NotImplemented:
+                self._brightness = max(0, min(255, int(brightness)))
+            self._pixels = list(entry["pixels"])
+            await self.push_frame(**entry["params"], effect_name=effect)
+            return
         if effect not in EFFECT_LIST:
             LOGGER.error("Effect %s not supported", effect)
             return
         self._effect = effect
         self._color_mode = ColorMode.BRIGHTNESS
         self._output_rgb = None  # the effect drives the LEDs now
+        self._pixel_frame_state = None  # an effect deactivates the pattern
         effect_id = EFFECT_MAP.get(effect)
         if effect_id > 11: effect = 11
         brightness_pct = int(brightness /255 * 100)
@@ -725,6 +811,236 @@ class IDEALLEDInstance:
         speed = max(1, min(100, speed))
         self._effect_speed = speed
         LOGGER.debug(f"Effect speed set to {speed}")
-        # If an effect is currently active, reapply it with the new speed
-        if self._effect is not None:
+        if self.pattern_effect_name() is not None:
+            # A named pattern is showing: store the speed in its registry
+            # entry and repaint, keeping the short pattern name as the
+            # state effect.
+            name = self._effect[len(PATTERN_PREFIX):]
+            entry = self._patterns.get(name)
+            if entry is not None:
+                entry["params"]["speed"] = speed
+                if self._pixel_frame_state is not None:
+                    self._pixel_frame_state["speed"] = speed
+                await self.push_frame(**entry["params"], effect_name=self._effect)
+            else:
+                await self.set_effect(self._effect, self._brightness)
+        elif self._effect is not None:
+            # If an effect is currently active, reapply it with the new speed
             await self.set_effect(self._effect, self._brightness)
+
+    # ------------------------------------------------------------------
+    # Pixel level control ("bulk paint" / collections protocol)
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Named patterns (registry)
+    # ------------------------------------------------------------------
+
+    def save_pattern(self, name: str, params: dict, pixels: list) -> None:
+        """Store a named pattern in the registry (overwrites same name)."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Pattern name must not be empty")
+        if len(name) > MAX_PATTERN_NAME_LEN:
+            raise ValueError(
+                f"Pattern name too long (max {MAX_PATTERN_NAME_LEN} characters)"
+            )
+        if name not in self._patterns and len(self._patterns) >= MAX_PATTERNS:
+            raise ValueError(f"Pattern registry full (max {MAX_PATTERNS})")
+        if not pixels or len(pixels) > MAX_PIXEL_COUNT:
+            raise ValueError(
+                f"Pattern must have 1-{MAX_PIXEL_COUNT} LEDs, got {len(pixels)}"
+            )
+        self._patterns[name] = {
+            "params": {
+                "mode": int(params["mode"]),
+                "speed": max(1, min(100, int(params["speed"]))),
+                "rle": bool(params["rle"]),
+            },
+            "pixels": [tuple(int(v) for v in rgb) for rgb in pixels],
+        }
+
+    def delete_pattern(self, name: str) -> None:
+        if name not in self._patterns:
+            raise ValueError(f"Unknown pattern: {name}")
+        del self._patterns[name]
+
+    def pattern_registry_json(self) -> str:
+        """Serialize the registry for the entity attributes (persistence)."""
+        return json.dumps(
+            {
+                name: {
+                    "mode": entry["params"]["mode"],
+                    "speed": entry["params"]["speed"],
+                    "rle": entry["params"]["rle"],
+                    "hex": "".join(
+                        f"{r:02x}{g:02x}{b:02x}" for r, g, b in entry["pixels"]
+                    ),
+                }
+                for name, entry in self._patterns.items()
+            }
+        )
+
+    def load_pattern_registry(self, data: str) -> None:
+        """Restore the registry from its serialized form."""
+        registry = json.loads(data)
+        if not isinstance(registry, dict):
+            raise ValueError("pattern registry must be an object")
+        patterns: dict[str, dict] = {}
+        for name, entry in registry.items():
+            mode = int(entry["mode"])
+            if mode not in PIXEL_MODES.values():
+                raise ValueError(f"Unknown pixel mode id: {mode}")
+            speed = max(1, min(100, int(entry["speed"])))
+            rle = bool(entry["rle"])
+            pixels = _pixels_from_hex(entry["hex"])
+            patterns[name] = {
+                "params": {"mode": mode, "speed": speed, "rle": rle},
+                "pixels": pixels,
+            }
+        self._patterns = patterns
+
+    @property
+    def pixel_count(self) -> int:
+        """Number of LEDs the framebuffer holds."""
+        return self._pixel_count
+
+    @property
+    def pixels(self) -> list[tuple[int, int, int]]:
+        """Current framebuffer, one (r, g, b) tuple per LED (8 bit values)."""
+        return list(self._pixels)
+
+    @retry_bluetooth_connection_error
+    async def set_pixel_count(self, count: int) -> None:
+        """Tell the controller how many LEDs are on the string (LAMPN packet)."""
+        count = int(count)
+        if not 1 <= count <= MAX_PIXEL_COUNT:
+            raise ValueError(
+                f"pixel_count must be between 1 and {MAX_PIXEL_COUNT}, got {count}"
+            )
+        packet = bytearray(LAMPN_PACKET)
+        top = count >> 8
+        bottom = count & 0xFF
+        packet[6] = top
+        packet[7] = bottom
+        packet[8] = top
+        packet[9] = bottom
+        await self._write(packet)
+        self._pixel_count = count
+        if len(self._pixels) > count:
+            self._pixels = self._pixels[:count]
+        elif len(self._pixels) < count:
+            self._pixels = self._pixels + [(0, 0, 0)] * (count - len(self._pixels))
+
+    def _update_framebuffer(
+        self, assignments: list[tuple[int, int, tuple[int, int, int]]]
+    ) -> None:
+        """Write (start, end, (r, g, b)) assignments into the framebuffer."""
+        for start, end, rgb in assignments:
+            if start > end:
+                raise ValueError(
+                    f"Invalid pixel range: 'from' ({start}) greater than 'to' ({end})"
+                )
+            if start < 0 or end >= self._pixel_count:
+                raise ValueError(
+                    f"Pixel range {start}-{end} is outside the strip "
+                    f"(0-{self._pixel_count - 1}). If your strip has more "
+                    f"LEDs, pass 'pixel_count'."
+                )
+            self._pixels[start : end + 1] = [rgb] * (end - start + 1)
+
+    def _build_collection_packets(
+        self, mode: int, speed: int, rle: bool = True
+    ) -> list[bytearray]:
+        """Build the colour data packets for the current framebuffer.
+
+        Each collection is 7 bytes:
+            0x00, number of pixels for this colour, red, green, blue, mode, speed
+        At most MAX_COLLECTIONS_PER_PACKET collections fit into one packet.
+        """
+        # Compress the framebuffer into runs of identical colours. Colour
+        # values are shifted to 5 bits: the controller's voltage regulator
+        # cannot drive many LEDs at full 8 bit brightness. Brightness scales
+        # the pattern like any other light mode.
+        scale = self._brightness if self._brightness else 255
+        runs: list[list[int]] = []  # [length, red5, green5, blue5]
+        for r, g, b in self._pixels:
+            r5 = (max(0, min(255, int(r))) * scale // 255) >> 3
+            g5 = (max(0, min(255, int(g))) * scale // 255) >> 3
+            b5 = (max(0, min(255, int(b))) * scale // 255) >> 3
+            if rle and runs and runs[-1][1:] == [r5, g5, b5] and runs[-1][0] < 255:
+                runs[-1][0] += 1
+            else:
+                runs.append([1, r5, g5, b5])
+        packets = []
+        chunks = [
+            runs[i : i + MAX_COLLECTIONS_PER_PACKET]
+            for i in range(0, len(runs), MAX_COLLECTIONS_PER_PACKET)
+        ]
+        for seq, chunk in enumerate(chunks):
+            data = bytearray()
+            data.append(0)  # length, filled in below
+            data.append(seq)  # sequence number
+            for run_length, r5, g5, b5 in chunk:
+                data.append(0x00)  # collection start marker
+                data.append(run_length)
+                data.append(r5)
+                data.append(g5)
+                data.append(b5)
+                data.append(mode)
+                data.append(speed)
+            data[0] = len(data) - 1
+            packets.append(data)
+        return packets
+
+    @retry_bluetooth_connection_error
+    async def push_frame(
+        self,
+        mode: int = 2,
+        speed: int = 50,
+        rle: bool = True,
+        effect_name: str | None = None,
+    ) -> None:
+        """Send the whole framebuffer to the strip using the bulk paint protocol."""
+        if self._command_type != "TYPE2":
+            LOGGER.warning(
+                "%s: Bulk paint has only been verified on TYPE2 controllers, "
+                "this device reports %s. If it misbehaves, stop using "
+                "set_pixels.",
+                self.name,
+                self._command_type,
+            )
+        packets = self._build_collection_packets(mode, speed, rle)
+        doot = bytearray(DOOT_PACKET)
+        doot[5] = len(packets)
+        await self._write(doot)
+        for packet in packets:
+            await self._write_colour_data(packet)
+        await self._write(bytearray(DOOTCP_PACKET))
+        await self._write(bytearray(DTARTCY_PACKET))
+        # The strip is now showing our DIY pattern. Whole-strip colours and
+        # controller effects deactivate it again (they clear
+        # _pixel_frame_state). The state effect is the pattern name when
+        # painted from a named pattern, otherwise None: an anonymous paint
+        # does not appear in the effect dropdown; save it as a pattern to
+        # make it addressable by scenes and the UI.
+        self._pixel_frame_state = {"mode": mode, "speed": speed, "rle": rle}
+        self._is_on = True
+        self._effect = effect_name
+
+    async def async_set_pixels(
+        self,
+        assignments: list[tuple[int, int, tuple[int, int, int]]],
+        mode: str = "solid",
+        speed: int = 50,
+        pixel_count: int | None = None,
+        rle: bool = True,
+    ) -> None:
+        """Entry point for the light entity: update pixels and push the frame."""
+        if mode not in PIXEL_MODES:
+            raise ValueError(f"mode must be one of {list(PIXEL_MODES)}, got '{mode}'")
+        speed = max(1, min(100, int(speed)))
+        if pixel_count is not None and int(pixel_count) != self._pixel_count:
+            await self.set_pixel_count(int(pixel_count))
+        self._update_framebuffer(assignments)
+        await self.push_frame(PIXEL_MODES[mode], speed, rle)

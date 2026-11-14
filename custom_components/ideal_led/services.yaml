@@ -1,0 +1,139 @@
+set_pixels:
+  name: Set individual LEDs
+  description: >-
+    Paint individual LEDs or LED ranges with their own colours (bulk paint /
+    "collections" protocol). The strip then shows your custom pattern instead
+    of an effect. Colour channels are limited to 5 bits internally to protect
+    the controller.
+  fields:
+    pixels:
+      name: Pixels
+      required: true
+      description: >-
+        List of ranges. Each entry has from (first LED number, 0-based),
+        to (optional, last LED number, inclusive) and color [r, g, b]
+        (0-255). LEDs that are not named keep their previously painted
+        colour.
+      example:
+        - from: 0
+          to: 9
+          color: [255, 0, 0]
+        - led: 50
+          color: [0, 255, 0]
+      selector:
+        object:
+    mode:
+      name: Mode
+      required: false
+      description: Display mode of the painted pixels.
+      selector:
+        select:
+          options:
+            - solid
+            - fade
+            - flash
+    speed:
+      name: Speed
+      required: false
+      description: Speed for the fade and flash modes (1-100).
+      selector:
+        number:
+          min: 1
+          max: 100
+    pixel_count:
+      name: LED count
+      required: false
+      description: >-
+        Number of LEDs on the strip. Sent to the controller when it differs
+        from the assumed count (default 100).
+      selector:
+        number:
+          min: 1
+          max: 255
+    rle:
+      name: Compression
+      required: false
+      description: >-
+        Compress runs of identical colours into a single collection
+        (recommended, much faster). Set to false if your strip shows
+        unexpected colours.
+      selector:
+        boolean:
+
+save_pattern:
+  name: Save pixel pattern
+  description: >-
+    Save a pixel pattern under a name. Saved patterns appear in the effect
+    list as "Pattern: <name>" and can be applied through the effect dropdown,
+    scenes or automations. Without pixels, the currently painted framebuffer
+    is saved. Saving itself sends nothing to the strip.
+  fields:
+    name:
+      name: Name
+      required: true
+      description: Name of the pattern (1-64 characters, overwrites same name).
+      example: Advent
+      selector:
+        text:
+    pixels:
+      name: Pixels
+      required: false
+      description: >-
+        List of ranges (like set_pixels). LEDs that are not named are saved
+        as black. Without this field the current framebuffer is saved.
+      example:
+        - from: 0
+          to: 24
+          color: [255, 0, 0]
+        - led: 50
+          color: [0, 255, 0]
+      selector:
+        object:
+    mode:
+      name: Mode
+      required: false
+      description: Display mode of the pattern.
+      selector:
+        select:
+          options:
+            - solid
+            - fade
+            - flash
+    speed:
+      name: Speed
+      required: false
+      description: Speed for the fade and flash modes (1-100).
+      selector:
+        number:
+          min: 1
+          max: 100
+    pixel_count:
+      name: LED count
+      required: false
+      description: >-
+        Number of LEDs when pixels is given and differs from the assumed
+        count (default 100). Irrelevant when saving the current framebuffer.
+      selector:
+        number:
+          min: 1
+          max: 255
+    rle:
+      name: Compression
+      required: false
+      description: RLE compression when the pattern is shown later (default on).
+      selector:
+        boolean:
+
+delete_pattern:
+  name: Delete pixel pattern
+  description: >-
+    Delete a named pixel pattern from the registry. Scenes or effects that
+    still reference the pattern can no longer apply it afterwards.
+  fields:
+    name:
+      name: Name
+      required: true
+      description: Name of the pattern to delete.
+      example: Advent
+      selector:
+        text:
