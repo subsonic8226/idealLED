@@ -7,6 +7,8 @@ from .idealled import (
     IDEALLEDInstance,
     PIXEL_MODES,
     PATTERN_PREFIX,
+    DEFAULT_PIXEL_MODE,
+    DEFAULT_PIXEL_SPEED,
 )
 from .const import (
     DOMAIN,
@@ -172,29 +174,53 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
                     # The attribute is comma separated; parse it as one
                     # continuous hex string.
                     painted = painted.replace(",", "")
-                    pixels = [
+                    if len(painted) % 6:
+                        raise ValueError("pixels attribute must be rrggbb per LED")
+                    rgbs = [
                         tuple(int(painted[i + j : i + j + 2], 16) for j in (0, 2, 4))
                         for i in range(0, len(painted), 6)
                     ]
+                    params_attr = last.attributes.get("pixel_params")
+                    if params_attr:
+                        # Per-LED mode/speed (mmss hex per LED).
+                        params_attr = params_attr.replace(",", "")
+                        if len(params_attr) != len(rgbs) * 4:
+                            raise ValueError("pixel_params length mismatch")
+                        pixels = []
+                        for idx, (r, g, b) in enumerate(rgbs):
+                            m = int(params_attr[idx * 4 : idx * 4 + 2], 16)
+                            s = int(params_attr[idx * 4 + 2 : idx * 4 + 4], 16)
+                            if m not in PIXEL_MODES.values():
+                                raise ValueError(f"Unknown pixel mode id: {m}")
+                            pixels.append((r, g, b, m, max(1, min(100, s))))
+                    else:
+                        # Legacy state: one mode/speed for the whole frame.
+                        # `is not None` matters: mode 0 (flash) is falsy.
+                        mode = last.attributes.get("pixel_mode")
+                        speed = last.attributes.get("pixel_speed")
+                        m = (
+                            int(mode)
+                            if mode is not None
+                            else DEFAULT_PIXEL_MODE
+                        )
+                        s = (
+                            int(speed)
+                            if speed is not None
+                            else DEFAULT_PIXEL_SPEED
+                        )
+                        pixels = [(r, g, b, m, max(1, min(100, s))) for r, g, b in rgbs]
                     if pixels:
                         self._instance._pixels = pixels
                         self._instance._pixel_count = len(pixels)
-                        # `or` would swallow mode 0 (flash), so compare
-                        # against None explicitly.
-                        mode = last.attributes.get("pixel_mode")
-                        speed = last.attributes.get("pixel_speed")
-                        params = {
-                            "mode": int(mode) if mode is not None else 2,
-                            "speed": int(speed) if speed is not None else 50,
-                            "rle": last.attributes.get("pixel_rle", True),
-                        }
                         active = last.attributes.get("pixel_active")
                         if active is None:
                             # Pre-0.0.11 states only exposed `pixels` while
                             # the pattern was showing.
                             active = True
                         if active:
-                            self._instance._pixel_frame_state = dict(params)
+                            self._instance._pixel_frame_state = {
+                                "rle": bool(last.attributes.get("pixel_rle", True))
+                            }
                 except ValueError:
                     LOGGER.debug("%s: could not restore painted frame", self.name)
             if (registry := last.attributes.get("patterns")):
@@ -401,21 +427,28 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
     def extra_state_attributes(self):
         frame = self._instance._pixel_frame_state
         # pixel_active distinguishes "pattern showing" from "no pattern";
-        # the enforcer only re-asserts the active frame. `pixels` is only
-        # exposed while a pattern is active: it is what restore and scene
-        # debugging need, and inactive anonymous paints are not addressable.
+        # the enforcer only re-asserts the active frame. `pixels` (rrggbb per
+        # LED) and `pixel_params` (mmss per LED) are only exposed while a
+        # pattern is active: they are what restore and scene debugging need,
+        # and inactive anonymous paints are not addressable.
         return {
             "in_sync": self._in_sync,
             "last_confirmed": self._last_confirmed,
             "consecutive_failures": self._consecutive_failures,
             "pixel_count": self._instance.pixel_count,
             "pixel_active": frame is not None,
-            "pixel_mode": frame["mode"] if frame else None,
-            "pixel_speed": frame["speed"] if frame else None,
             "pixel_rle": frame["rle"] if frame else None,
             "pixels": (
                 ",".join(
-                    f"{r:02x}{g:02x}{b:02x}" for r, g, b in self._instance.pixels
+                    f"{r:02x}{g:02x}{b:02x}"
+                    for r, g, b, _m, _s in self._instance.pixels
+                )
+                if frame
+                else None
+            ),
+            "pixel_params": (
+                ",".join(
+                    f"{m:02x}{s:02x}" for _r, _g, _b, m, s in self._instance.pixels
                 )
                 if frame
                 else None
@@ -524,8 +557,15 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
         self._run_command(lambda: self._instance.turn_off(transition), transition)
         self.async_write_ha_state()
 
-    def _pixel_assignments(self, pixels: list, count: int) -> list:
-        """Parse and validate the `pixels` field of a service call."""
+    def _pixel_assignments(
+        self, pixels: list, count: int, default_mode: int, default_speed: int
+    ) -> list:
+        """Parse and validate the `pixels` field of a service call.
+
+        Each entry may carry its own mode/speed for its range; entries
+        without them use the call-level defaults. Returns
+        (start, end, (r, g, b), mode, speed) tuples.
+        """
         assignments = []
         for item in pixels:
             if not isinstance(item, dict):
@@ -542,10 +582,20 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
             color = item.get("color", [255, 255, 255])
             if len(color) != 3:
                 raise ValueError(f"color must be [r, g, b], got: {color}")
+            mode = item.get("mode")
+            if mode is None:
+                mode_id = default_mode
+            else:
+                if mode not in PIXEL_MODES:
+                    raise ValueError(
+                        f"mode must be one of {list(PIXEL_MODES)}, got '{mode}'"
+                    )
+                mode_id = PIXEL_MODES[mode]
+            speed = max(1, min(100, int(item.get("speed", default_speed))))
             assignments.append(
-                (start, end, (int(color[0]), int(color[1]), int(color[2])))
+                (start, end, (int(color[0]), int(color[1]), int(color[2])), mode_id, speed)
             )
-        for start, end, _rgb in assignments:
+        for start, end, _rgb, _m, _s in assignments:
             if start > end or start < 0 or end >= count:
                 raise ValueError(
                     f"Pixel range {start}-{end} is outside the strip (0-{count - 1}). "
@@ -566,7 +616,7 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
         if mode not in PIXEL_MODES:
             raise ValueError(f"mode must be one of {list(PIXEL_MODES)}, got '{mode}'")
         count = int(pixel_count) if pixel_count is not None else self._instance.pixel_count
-        assignments = self._pixel_assignments(pixels, count)
+        assignments = self._pixel_assignments(pixels, count, PIXEL_MODES[mode], speed)
         # Painting implies power on; send in the background like other
         # commands so a slow strip can't block the calling automation.
         self._desired_on = True
@@ -595,9 +645,10 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
         """
         if mode not in PIXEL_MODES:
             raise ValueError(f"mode must be one of {list(PIXEL_MODES)}, got '{mode}'")
+        default_mode = PIXEL_MODES[mode]
         if pixels is None:
             pix_list = self._instance.pixels
-            if not any(any(p) for p in pix_list):
+            if not any(any(p[:3]) for p in pix_list):
                 raise ValueError(
                     "The current framebuffer is empty; paint first or pass pixels"
                 )
@@ -607,13 +658,13 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
                 if pixel_count is not None
                 else self._instance.pixel_count
             )
-            assignments = self._pixel_assignments(pixels, count)
-            pix_list = [(0, 0, 0)] * count
-            for start, end, rgb in assignments:
-                pix_list[start : end + 1] = [rgb] * (end - start + 1)
-        self._instance.save_pattern(
-            name, {"mode": PIXEL_MODES[mode], "speed": speed, "rle": rle}, pix_list
-        )
+            assignments = self._pixel_assignments(pixels, count, default_mode, speed)
+            pix_list = [(0, 0, 0, default_mode, speed)] * count
+            for start, end, rgb, m, s in assignments:
+                pix_list[start : end + 1] = [(rgb[0], rgb[1], rgb[2], m, s)] * (
+                    end - start + 1
+                )
+        self._instance.save_pattern(name, rle, pix_list)
         self.async_write_ha_state()
 
     async def async_delete_pattern(self, name: str) -> None:

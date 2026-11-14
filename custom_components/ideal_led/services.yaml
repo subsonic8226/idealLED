@@ -12,14 +12,17 @@ set_pixels:
       description: >-
         List of ranges. Each entry has from (first LED number, 0-based),
         to (optional, last LED number, inclusive) and color [r, g, b]
-        (0-255). LEDs that are not named keep their previously painted
-        colour.
+        (0-255), plus optional mode and speed for this range only
+        (defaults: the call-level mode/speed). LEDs that are not named
+        keep their previously painted colour, mode and speed.
       example:
         - from: 0
           to: 9
           color: [255, 0, 0]
         - led: 50
           color: [0, 255, 0]
+          mode: flash
+          speed: 80
       selector:
         object:
     mode:
@@ -79,14 +82,17 @@ save_pattern:
       name: Pixels
       required: false
       description: >-
-        List of ranges (like set_pixels). LEDs that are not named are saved
-        as black. Without this field the current framebuffer is saved.
+        List of ranges (like set_pixels); each entry may override mode and
+        speed for its own range. LEDs that are not named are saved as
+        black. Without this field the current framebuffer is saved.
       example:
         - from: 0
           to: 24
           color: [255, 0, 0]
         - led: 50
           color: [0, 255, 0]
+          mode: fade
+          speed: 30
       selector:
         object:
     mode:

@@ -78,22 +78,25 @@ data:
   pixel_count: 100 # optional, only needed if your strip has a different LED count
   pixels:
     - { from: 0,  to: 24, color: [255, 0, 0] }
-    - { from: 25, to: 49, color: [0, 255, 0] }
+    - { from: 25, to: 49, color: [0, 255, 0], mode: flash, speed: 80 }
     - { from: 50, to: 99, color: [0, 0, 255] }
 ```
 
 - `pixels`: list of ranges. `from` is the first LED (0-based), `to` the last
   (inclusive, defaults to `from`), `color` is `[r, g, b]` (0-255). A single LED
-  can be given as `{ led: 42, color: [255, 0, 0] }`. LEDs that are not named
-  keep their previously painted colour; the whole frame is re-sent on every
-  call.
-- `mode`: `solid` (default), `fade` or `flash`.
-- `speed`: 1-100, used by `fade` and `flash`.
+  can be given as `{ led: 42, color: [255, 0, 0] }`. Each entry may also carry
+  its own `mode` and `speed` — mode and speed are per LED, not per call.
+  LEDs that are not named keep their previously painted colour, mode and
+  speed; the whole frame is re-sent on every call.
+- `mode`: `solid` (default), `fade` or `flash` — default for entries that
+  don't set their own.
+- `speed`: 1-100, used by `fade` and `flash` — default for entries that don't
+  set their own.
 - `rle`: compress runs of identical colours into a single collection (default,
   much faster). Set to `false` if your strip shows unexpected colours.
-- The current frame is exposed as the `pixels` attribute (plus `pixel_count`,
-  `pixel_mode`, `pixel_speed`, `pixel_rle`, `pixel_active`) so it is restored
-  across restarts. A paint applied via `set_pixels` is anonymous: while it is
+- The current frame is exposed as the `pixels` attribute (rrggbb per LED, plus
+  `pixel_params` with mmss mode/speed per LED, and `pixel_count`, `pixel_rle`,
+  `pixel_active`) so it is restored across restarts. A paint applied via `set_pixels` is anonymous: while it is
   showing it is restored and re-asserted like any state, but it is not
   addressable through the effect dropdown or scenes. Save it as a pattern
   (below) to give it a name.
@@ -119,6 +122,8 @@ data:
 ```
 
 - Without `pixels`, the currently painted framebuffer is saved.
+- Each `pixels` entry may override `mode`/`speed` for its own range; the
+  call-level `mode`/`speed` are the defaults for the remaining entries.
 - Applying works like any effect: `light.turn_on` with `effect: "Pattern:
   Advent"`, via the effect dropdown, or by capturing it in a scene.
 - The pattern registry persists across restarts (entity attribute) and is

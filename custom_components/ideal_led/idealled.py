@@ -118,6 +118,8 @@ MAX_PATTERN_NAME_LEN = 64
 MAX_PATTERNS = 20
 DEFAULT_PIXEL_COUNT = 100
 MAX_PIXEL_COUNT = 255
+DEFAULT_PIXEL_MODE = PIXEL_MODES["solid"]
+DEFAULT_PIXEL_SPEED = 50
 
 
 def _pixels_from_hex(hexdata: str) -> list[tuple[int, int, int]]:
@@ -132,6 +134,25 @@ def _pixels_from_hex(hexdata: str) -> list[tuple[int, int, int]]:
         tuple(int(hexdata[i + j : i + j + 2], 16) for j in (0, 2, 4))
         for i in range(0, len(hexdata), 6)
     ]
+
+
+def _frame_from_hex(hexdata: str) -> list[tuple[int, int, int, int, int]]:
+    """Decode rrggbbmmss hex per LED into (r, g, b, mode, speed) tuples."""
+    hexdata = str(hexdata).replace(",", "").strip()
+    if not hexdata or len(hexdata) % 10:
+        raise ValueError("Frame payload must be rrggbbmmss hex per LED")
+    count = len(hexdata) // 10
+    if count > MAX_PIXEL_COUNT:
+        raise ValueError(f"Frame has {count} LEDs, max is {MAX_PIXEL_COUNT}")
+    frame = []
+    for i in range(0, len(hexdata), 10):
+        r, g, b, mode, speed = (
+            int(hexdata[i + j : i + j + 2], 16) for j in (0, 2, 4, 6, 8)
+        )
+        if mode not in PIXEL_MODES.values():
+            raise ValueError(f"Unknown pixel mode id: {mode}")
+        frame.append((r, g, b, mode, max(1, min(100, speed))))
+    return frame
 
 WrapFuncType = TypeVar("WrapFuncType", bound=Callable[..., Any])
 
@@ -256,14 +277,17 @@ class IDEALLEDInstance:
         self._firmware_version = fw_version
         self._model = self._detect_model()
         self._on_update_callbacks = []
-        # Pixel level ("bulk paint") state: one (r, g, b) tuple per LED. When
-        # _pixel_frame_state is set, a pattern is ACTIVE: the state enforcer
-        # re-asserts it (instead of a solid colour) on resends and restarts.
-        # Solid colours and controller effects clear it.
+        # Pixel level ("bulk paint") state: one (r, g, b, mode, speed) tuple
+        # per LED, so every LED/run can flash, fade or shine solid at its own
+        # speed. When _pixel_frame_state is set, a pattern is ACTIVE: the
+        # state enforcer re-asserts it (instead of a solid colour) when out
+        # of sync and after restarts. Solid colours and effects clear it.
         self._pixel_count = DEFAULT_PIXEL_COUNT
-        self._pixels = [(0, 0, 0)] * self._pixel_count
-        self._pixel_frame_state: dict | None = None
-        # Named patterns: name -> {"params": {...}, "pixels": [...]}
+        self._pixels = [
+            (0, 0, 0, DEFAULT_PIXEL_MODE, DEFAULT_PIXEL_SPEED)
+        ] * self._pixel_count
+        self._pixel_frame_state: dict | None = None  # {"rle": bool} while active
+        # Named patterns: name -> {"rle": bool, "pixels": [(r,g,b,mode,speed)]}
         self._patterns: dict[str, dict] = {}
 
         LOGGER.debug(
@@ -509,7 +533,7 @@ class IDEALLEDInstance:
             if brightness is not None and brightness is not NotImplemented:
                 self._brightness = max(0, min(255, int(brightness)))
             self._pixels = list(entry["pixels"])
-            await self.push_frame(**entry["params"], effect_name=effect)
+            await self.push_frame(rle=entry["rle"], effect_name=effect)
             return
         if effect not in EFFECT_LIST:
             LOGGER.error("Effect %s not supported", effect)
@@ -818,10 +842,18 @@ class IDEALLEDInstance:
             name = self._effect[len(PATTERN_PREFIX):]
             entry = self._patterns.get(name)
             if entry is not None:
-                entry["params"]["speed"] = speed
+                # The slider sets the speed of every LED of the showing
+                # pattern, both in the registry entry and the live frame.
+                entry["pixels"] = [
+                    (r, g, b, m, speed) for r, g, b, m, _s in entry["pixels"]
+                ]
+                self._pixels = [
+                    (r, g, b, m, speed) for r, g, b, m, _s in self._pixels
+                ]
                 if self._pixel_frame_state is not None:
-                    self._pixel_frame_state["speed"] = speed
-                await self.push_frame(**entry["params"], effect_name=self._effect)
+                    await self.push_frame(
+                        rle=self._pixel_frame_state["rle"], effect_name=self._effect
+                    )
             else:
                 await self.set_effect(self._effect, self._brightness)
         elif self._effect is not None:
@@ -836,8 +868,11 @@ class IDEALLEDInstance:
     # Named patterns (registry)
     # ------------------------------------------------------------------
 
-    def save_pattern(self, name: str, params: dict, pixels: list) -> None:
-        """Store a named pattern in the registry (overwrites same name)."""
+    def save_pattern(self, name: str, rle: bool, pixels: list) -> None:
+        """Store a named pattern in the registry (overwrites same name).
+
+        pixels: one (r, g, b, mode, speed) tuple per LED.
+        """
         name = (name or "").strip()
         if not name:
             raise ValueError("Pattern name must not be empty")
@@ -851,14 +886,15 @@ class IDEALLEDInstance:
             raise ValueError(
                 f"Pattern must have 1-{MAX_PIXEL_COUNT} LEDs, got {len(pixels)}"
             )
-        self._patterns[name] = {
-            "params": {
-                "mode": int(params["mode"]),
-                "speed": max(1, min(100, int(params["speed"]))),
-                "rle": bool(params["rle"]),
-            },
-            "pixels": [tuple(int(v) for v in rgb) for rgb in pixels],
-        }
+        frame = []
+        for px in pixels:
+            if len(px) != 5:
+                raise ValueError("Each pixel must be (r, g, b, mode, speed)")
+            r, g, b, mode, speed = (int(v) for v in px)
+            if mode not in PIXEL_MODES.values():
+                raise ValueError(f"Unknown pixel mode id: {mode}")
+            frame.append((r, g, b, mode, max(1, min(100, speed))))
+        self._patterns[name] = {"rle": bool(rle), "pixels": frame}
 
     def delete_pattern(self, name: str) -> None:
         if name not in self._patterns:
@@ -870,11 +906,10 @@ class IDEALLEDInstance:
         return json.dumps(
             {
                 name: {
-                    "mode": entry["params"]["mode"],
-                    "speed": entry["params"]["speed"],
-                    "rle": entry["params"]["rle"],
-                    "hex": "".join(
-                        f"{r:02x}{g:02x}{b:02x}" for r, g, b in entry["pixels"]
+                    "rle": entry["rle"],
+                    "frame": "".join(
+                        f"{r:02x}{g:02x}{b:02x}{m:02x}{s:02x}"
+                        for r, g, b, m, s in entry["pixels"]
                     ),
                 }
                 for name, entry in self._patterns.items()
@@ -888,16 +923,21 @@ class IDEALLEDInstance:
             raise ValueError("pattern registry must be an object")
         patterns: dict[str, dict] = {}
         for name, entry in registry.items():
-            mode = int(entry["mode"])
-            if mode not in PIXEL_MODES.values():
-                raise ValueError(f"Unknown pixel mode id: {mode}")
-            speed = max(1, min(100, int(entry["speed"])))
-            rle = bool(entry["rle"])
-            pixels = _pixels_from_hex(entry["hex"])
-            patterns[name] = {
-                "params": {"mode": mode, "speed": speed, "rle": rle},
-                "pixels": pixels,
-            }
+            rle = bool(entry.get("rle", True))
+            if "frame" in entry:
+                # Current format: per-LED rrggbbmmss.
+                pixels = _frame_from_hex(entry["frame"])
+            else:
+                # Legacy format: one mode/speed for the whole pattern.
+                mode = int(entry["mode"])
+                if mode not in PIXEL_MODES.values():
+                    raise ValueError(f"Unknown pixel mode id: {mode}")
+                speed = max(1, min(100, int(entry["speed"])))
+                pixels = [
+                    (r, g, b, mode, speed)
+                    for r, g, b in _pixels_from_hex(entry["hex"])
+                ]
+            patterns[name] = {"rle": rle, "pixels": pixels}
         self._patterns = patterns
 
     @property
@@ -906,8 +946,8 @@ class IDEALLEDInstance:
         return self._pixel_count
 
     @property
-    def pixels(self) -> list[tuple[int, int, int]]:
-        """Current framebuffer, one (r, g, b) tuple per LED (8 bit values)."""
+    def pixels(self) -> list[tuple[int, int, int, int, int]]:
+        """Current framebuffer: one (r, g, b, mode, speed) tuple per LED."""
         return list(self._pixels)
 
     @retry_bluetooth_connection_error
@@ -930,13 +970,15 @@ class IDEALLEDInstance:
         if len(self._pixels) > count:
             self._pixels = self._pixels[:count]
         elif len(self._pixels) < count:
-            self._pixels = self._pixels + [(0, 0, 0)] * (count - len(self._pixels))
+            self._pixels = self._pixels + [
+                (0, 0, 0, DEFAULT_PIXEL_MODE, DEFAULT_PIXEL_SPEED)
+            ] * (count - len(self._pixels))
 
     def _update_framebuffer(
-        self, assignments: list[tuple[int, int, tuple[int, int, int]]]
+        self, assignments: list[tuple[int, int, tuple[int, int, int], int, int]]
     ) -> None:
-        """Write (start, end, (r, g, b)) assignments into the framebuffer."""
-        for start, end, rgb in assignments:
+        """Write (start, end, (r, g, b), mode, speed) assignments into the framebuffer."""
+        for start, end, rgb, mode, speed in assignments:
             if start > end:
                 raise ValueError(
                     f"Invalid pixel range: 'from' ({start}) greater than 'to' ({end})"
@@ -947,31 +989,35 @@ class IDEALLEDInstance:
                     f"(0-{self._pixel_count - 1}). If your strip has more "
                     f"LEDs, pass 'pixel_count'."
                 )
-            self._pixels[start : end + 1] = [rgb] * (end - start + 1)
+            px = (rgb[0], rgb[1], rgb[2], mode, speed)
+            self._pixels[start : end + 1] = [px] * (end - start + 1)
 
-    def _build_collection_packets(
-        self, mode: int, speed: int, rle: bool = True
-    ) -> list[bytearray]:
+    def _build_collection_packets(self, rle: bool = True) -> list[bytearray]:
         """Build the colour data packets for the current framebuffer.
 
         Each collection is 7 bytes:
             0x00, number of pixels for this colour, red, green, blue, mode, speed
-        At most MAX_COLLECTIONS_PER_PACKET collections fit into one packet.
+        Mode and speed come from each LED, so neighbouring runs can flash,
+        fade or shine solid at different speeds. At most
+        MAX_COLLECTIONS_PER_PACKET collections fit into one packet.
         """
-        # Compress the framebuffer into runs of identical colours. Colour
-        # values are shifted to 5 bits: the controller's voltage regulator
-        # cannot drive many LEDs at full 8 bit brightness. Brightness scales
-        # the pattern like any other light mode.
+        # Compress the framebuffer into runs of identical colour AND
+        # mode/speed. Colour values are shifted to 5 bits: the controller's
+        # voltage regulator cannot drive many LEDs at full 8 bit brightness.
+        # Brightness scales the pattern like any other light mode.
         scale = self._brightness if self._brightness else 255
-        runs: list[list[int]] = []  # [length, red5, green5, blue5]
-        for r, g, b in self._pixels:
+        runs: list[list[int]] = []  # [length, red5, green5, blue5, mode, speed]
+        for r, g, b, mode, speed in self._pixels:
             r5 = (max(0, min(255, int(r))) * scale // 255) >> 3
             g5 = (max(0, min(255, int(g))) * scale // 255) >> 3
             b5 = (max(0, min(255, int(b))) * scale // 255) >> 3
-            if rle and runs and runs[-1][1:] == [r5, g5, b5] and runs[-1][0] < 255:
+            mode = int(mode) if int(mode) in PIXEL_MODES.values() else DEFAULT_PIXEL_MODE
+            speed = max(1, min(100, int(speed)))
+            key = [r5, g5, b5, mode, speed]
+            if rle and runs and runs[-1][1:] == key and runs[-1][0] < 255:
                 runs[-1][0] += 1
             else:
-                runs.append([1, r5, g5, b5])
+                runs.append([1] + key)
         packets = []
         chunks = [
             runs[i : i + MAX_COLLECTIONS_PER_PACKET]
@@ -981,7 +1027,7 @@ class IDEALLEDInstance:
             data = bytearray()
             data.append(0)  # length, filled in below
             data.append(seq)  # sequence number
-            for run_length, r5, g5, b5 in chunk:
+            for run_length, r5, g5, b5, mode, speed in chunk:
                 data.append(0x00)  # collection start marker
                 data.append(run_length)
                 data.append(r5)
@@ -996,12 +1042,13 @@ class IDEALLEDInstance:
     @retry_bluetooth_connection_error
     async def push_frame(
         self,
-        mode: int = 2,
-        speed: int = 50,
         rle: bool = True,
         effect_name: str | None = None,
     ) -> None:
-        """Send the whole framebuffer to the strip using the bulk paint protocol."""
+        """Send the whole framebuffer to the strip using the bulk paint protocol.
+
+        Mode and speed are taken per LED from the framebuffer.
+        """
         if self._command_type != "TYPE2":
             LOGGER.warning(
                 "%s: Bulk paint has only been verified on TYPE2 controllers, "
@@ -1010,7 +1057,7 @@ class IDEALLEDInstance:
                 self.name,
                 self._command_type,
             )
-        packets = self._build_collection_packets(mode, speed, rle)
+        packets = self._build_collection_packets(rle)
         doot = bytearray(DOOT_PACKET)
         doot[5] = len(packets)
         await self._write(doot)
@@ -1024,23 +1071,27 @@ class IDEALLEDInstance:
         # painted from a named pattern, otherwise None: an anonymous paint
         # does not appear in the effect dropdown; save it as a pattern to
         # make it addressable by scenes and the UI.
-        self._pixel_frame_state = {"mode": mode, "speed": speed, "rle": rle}
+        self._pixel_frame_state = {"rle": rle}
         self._is_on = True
         self._effect = effect_name
 
     async def async_set_pixels(
         self,
-        assignments: list[tuple[int, int, tuple[int, int, int]]],
+        assignments: list[tuple[int, int, tuple[int, int, int], int, int]],
         mode: str = "solid",
         speed: int = 50,
         pixel_count: int | None = None,
         rle: bool = True,
     ) -> None:
-        """Entry point for the light entity: update pixels and push the frame."""
+        """Entry point for the light entity: update pixels and push the frame.
+
+        Assignments carry (start, end, rgb, mode, speed); mode/speed here are
+        only the defaults for entries that don't specify their own.
+        """
         if mode not in PIXEL_MODES:
             raise ValueError(f"mode must be one of {list(PIXEL_MODES)}, got '{mode}'")
         speed = max(1, min(100, int(speed)))
         if pixel_count is not None and int(pixel_count) != self._pixel_count:
             await self.set_pixel_count(int(pixel_count))
         self._update_framebuffer(assignments)
-        await self.push_frame(PIXEL_MODES[mode], speed, rle)
+        await self.push_frame(rle=rle)
