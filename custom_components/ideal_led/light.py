@@ -320,11 +320,14 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
             if self._instance._pixel_frame_state is not None:
                 # The desired state is a painted pattern, not a solid
                 # colour. Keep the pattern name as the state effect if a
-                # named pattern is showing.
-                await self._instance.push_frame(
-                    **self._instance._pixel_frame_state,
-                    effect_name=self._instance.pattern_effect_name(),
-                )
+                # named pattern is showing. Like effects, re-assert only
+                # when out of sync: re-pushing on every in-sync resend
+                # restarts flash/fade animations.
+                if not self._in_sync:
+                    await self._instance.push_frame(
+                        **self._instance._pixel_frame_state,
+                        effect_name=self._instance.pattern_effect_name(),
+                    )
             elif self._instance._effect is not None:
                 # Effects animate on the controller itself, so an in-sync
                 # resend only powers on and leaves the animation running.
