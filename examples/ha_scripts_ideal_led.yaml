@@ -1,0 +1,197 @@
+# HA-Skripte für die ideal_led-Integration (Fork subsonic8226/idealLED).
+#
+# Übernehmen: Inhalt unter `script:` in configuration.yaml einfügen
+# (oder: Einstellungen -> Automationen & Szenen -> Skripte -> "Skript erstellen"
+# im YAML-Modus). Alle Skripte haben Eingabefelder (Parameter), die beim
+# Ausführen als Formular angezeigt werden. LED-Anzahl ist auf 102
+# voreingestellt; alternativ einmalig in den Integrations-Optionen setzen.
+#
+# Voraussetzung: Die Integration läuft, das Gerät ist eingerichtet.
+
+script:
+  ideal_led_paint_range:
+    alias: "iDeal LED: LED-Bereich malen"
+    description: >-
+      Malt einen LED-Bereich (from bis to) mit Farbe, Modus und Speed.
+      Optional direkt als benanntes Pattern speichern.
+    icon: mdi:palette
+    fields:
+      light_entity:
+        name: Licht
+        description: Die iDeal-LED-Kette
+        required: true
+        selector:
+          entity:
+            integration: ideal_led
+            domain: light
+      pixel_count:
+        name: LED-Anzahl
+        description: Anzahl LEDs auf der Kette (wird ans Gerät gesendet, wenn abweichend)
+        required: false
+        default: 102
+        selector:
+          number:
+            min: 1
+            max: 255
+      from:
+        name: Erste LED
+        description: 0-basiert
+        required: true
+        default: 0
+        selector:
+          number:
+            min: 0
+            max: 254
+      to:
+        name: Letzte LED
+        description: inklusive, leer lassen = nur die eine LED ab `from`
+        required: false
+        selector:
+          number:
+            min: 0
+            max: 254
+      color:
+        name: Farbe
+        required: false
+        default: [255, 0, 0]
+        selector:
+          color_rgb:
+      mode:
+        name: Modus
+        required: false
+        default: solid
+        selector:
+          select:
+            options: [solid, fade, flash]
+      speed:
+        name: Speed
+        description: nur für fade/flash (1-100)
+        required: false
+        default: 50
+        selector:
+          number:
+            min: 1
+            max: 100
+      rle:
+        name: RLE-Kompression
+        required: false
+        default: true
+        selector:
+          boolean:
+      save_as:
+        name: Als Pattern speichern unter
+        description: leer lassen = nicht speichern
+        required: false
+        default: ""
+        selector:
+          text:
+    sequence:
+      - alias: Bereich malen
+        service: ideal_led.set_pixel_range
+        target:
+          entity_id: "{{ light_entity }}"
+        data:
+          from: "{{ from }}"
+          to: "{{ to if to is not none else from }}"
+          color: "{{ color }}"
+          mode: "{{ mode }}"
+          speed: "{{ speed }}"
+          pixel_count: "{{ pixel_count }}"
+          rle: "{{ rle }}"
+      - alias: Optional als Pattern speichern
+        if: "{{ save_as | length > 0 }}"
+        then:
+          - service: ideal_led.save_pattern
+            target:
+              entity_id: "{{ light_entity }}"
+            data:
+              name: "{{ save_as }}"
+              pixels:
+                - from: "{{ from }}"
+                  to: "{{ to if to is not none else from }}"
+                  color: "{{ color }}"
+                  mode: "{{ mode }}"
+                  speed: "{{ speed }}"
+              pixel_count: "{{ pixel_count }}"
+              mode: "{{ mode }}"
+              speed: "{{ speed }}"
+              rle: "{{ rle }}"
+
+  ideal_led_fill_all:
+    alias: "iDeal LED: ganze Kette füllen"
+    description: Füllt alle LEDs der Kette (default 102) mit einer Farbe/Modus/Speed.
+    icon: mdi:format-color-fill
+    fields:
+      light_entity:
+        name: Licht
+        required: true
+        selector:
+          entity:
+            integration: ideal_led
+            domain: light
+      pixel_count:
+        name: LED-Anzahl
+        required: false
+        default: 102
+        selector:
+          number:
+            min: 1
+            max: 255
+      color:
+        name: Farbe
+        required: false
+        default: [255, 255, 255]
+        selector:
+          color_rgb:
+      mode:
+        name: Modus
+        required: false
+        default: solid
+        selector:
+          select:
+            options: [solid, fade, flash]
+      speed:
+        name: Speed
+        required: false
+        default: 50
+        selector:
+          number:
+            min: 1
+            max: 100
+    sequence:
+      - service: ideal_led.set_pixel_range
+        target:
+          entity_id: "{{ light_entity }}"
+        data:
+          from: 0
+          to: "{{ pixel_count - 1 }}"
+          color: "{{ color }}"
+          mode: "{{ mode }}"
+          speed: "{{ speed }}"
+          pixel_count: "{{ pixel_count }}"
+          rle: true
+
+  ideal_led_apply_pattern:
+    alias: "iDeal LED: Pattern anwenden"
+    description: Wendet ein gespeichertes Pattern per Namen an (z. B. aus einer Automation).
+    icon: mdi:play
+    fields:
+      light_entity:
+        name: Licht
+        required: true
+        selector:
+          entity:
+            integration: ideal_led
+            domain: light
+      pattern:
+        name: Pattern-Name
+        description: 'ohne Präfix, z. B. Advent (erscheint als Effekt "Pattern: Advent")'
+        required: true
+        selector:
+          text:
+    sequence:
+      - service: light.turn_on
+        target:
+          entity_id: "{{ light_entity }}"
+        data:
+          effect: "Pattern: {{ pattern }}"
