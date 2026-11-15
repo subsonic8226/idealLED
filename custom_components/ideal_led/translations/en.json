@@ -38,7 +38,8 @@
                     "reset": "Reset color when led turn on",
                     "delay": "Disconnect delay (0 equal never disconnect)",
                     "resend_interval": "Re-send on/off state every N seconds to keep the strip in sync (0 disables)",
-                    "default_transition": "Fade time in seconds when none is given (0 = instant)"
+                    "default_transition": "Fade time in seconds when none is given (0 = instant)",
+                    "pixel_count": "Number of LEDs on the strip (default 100), sent to the controller once at startup"
                 }
             }
         }

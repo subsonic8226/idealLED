@@ -23,7 +23,9 @@ from .const import (
     DEFAULT_RESEND_INTERVAL,
     CONF_DEFAULT_TRANSITION,
     DEFAULT_TRANSITION,
+    CONF_PIXEL_COUNT,
 )
+from .idealled import DEFAULT_PIXEL_COUNT, MAX_PIXEL_COUNT
 import logging
 
 LOGGER = logging.getLogger(__name__)
@@ -238,6 +240,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_DELAY: user_input[CONF_DELAY],
                 CONF_RESEND_INTERVAL: user_input[CONF_RESEND_INTERVAL],
                 CONF_DEFAULT_TRANSITION: user_input[CONF_DEFAULT_TRANSITION],
+                CONF_PIXEL_COUNT: user_input[CONF_PIXEL_COUNT],
             })
 
         return self.async_show_form(
@@ -253,6 +256,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_DEFAULT_TRANSITION,
                         default=options.get(CONF_DEFAULT_TRANSITION, DEFAULT_TRANSITION),
                     ): vol.All(vol.Coerce(float), vol.Range(min=0, max=60)),
+                    vol.Optional(
+                        CONF_PIXEL_COUNT,
+                        default=options.get(CONF_PIXEL_COUNT, DEFAULT_PIXEL_COUNT),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=MAX_PIXEL_COUNT)),
                 }
             ), errors=errors
         )

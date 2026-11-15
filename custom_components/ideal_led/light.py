@@ -19,7 +19,9 @@ from .const import (
     RESET_AFTER_FAILURES,
     CONF_DEFAULT_TRANSITION,
     DEFAULT_TRANSITION,
+    CONF_PIXEL_COUNT,
 )
+from .select import PATTERNS_CHANGED_SIGNAL
 
 from homeassistant.const import CONF_MAC, STATE_ON, STATE_OFF
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -39,6 +41,7 @@ from homeassistant.components.light import (
 from homeassistant.util.color import match_max_scale
 from homeassistant.helpers import device_registry
 from homeassistant.helpers import entity_platform
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 LOGGER = logging.getLogger(__name__)
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({vol.Required(CONF_MAC): cv.string})
@@ -77,6 +80,28 @@ DELETE_PATTERN_SCHEMA = {
     vol.Required("name"): cv.string,
 }
 
+# Flat, UI-friendly variant of set_pixels for a single range: every field is
+# a simple selector, so Developer Tools and the automation editor render a
+# proper form.
+SERVICE_SET_PIXEL_RANGE = "set_pixel_range"
+SET_PIXEL_RANGE_SCHEMA = {
+    vol.Required("from"): vol.All(vol.Coerce(int), vol.Range(min=0, max=254)),
+    vol.Optional("to"): vol.All(vol.Coerce(int), vol.Range(min=0, max=254)),
+    vol.Optional("color", default=[255, 255, 255]): vol.All(
+        cv.ensure_list,
+        [vol.All(vol.Coerce(int), vol.Range(min=0, max=255))],
+        vol.Length(min=3, max=3),
+    ),
+    vol.Optional("mode", default="solid"): vol.In(["solid", "fade", "flash"]),
+    vol.Optional("speed", default=50): vol.All(
+        vol.Coerce(int), vol.Range(min=1, max=100)
+    ),
+    vol.Optional("pixel_count"): vol.All(
+        vol.Coerce(int), vol.Range(min=1, max=255)
+    ),
+    vol.Optional("rle", default=True): cv.boolean,
+}
+
 async def async_setup_entry(hass, config_entry, async_add_devices):
     instance = hass.data[DOMAIN][config_entry.entry_id]
     # No initial connect here: with a weak BLE link it can stall HA startup for
@@ -88,6 +113,7 @@ async def async_setup_entry(hass, config_entry, async_add_devices):
     default_transition = config_entry.options.get(
         CONF_DEFAULT_TRANSITION, DEFAULT_TRANSITION
     )
+    pixel_count_option = config_entry.options.get(CONF_PIXEL_COUNT)
     async_add_devices(
         [
             IDEALLEDLight(
@@ -96,6 +122,7 @@ async def async_setup_entry(hass, config_entry, async_add_devices):
                 config_entry.entry_id,
                 resend_interval,
                 default_transition,
+                pixel_count_option,
             )
         ]
     )
@@ -117,6 +144,11 @@ async def async_setup_entry(hass, config_entry, async_add_devices):
         DELETE_PATTERN_SCHEMA,
         "async_delete_pattern",
     )
+    platform.async_register_entity_service(
+        SERVICE_SET_PIXEL_RANGE,
+        SET_PIXEL_RANGE_SCHEMA,
+        "async_set_pixel_range",
+    )
 
 
 class IDEALLEDLight(LightEntity, RestoreEntity):
@@ -127,9 +159,13 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
         entry_id: str,
         resend_interval: int = DEFAULT_RESEND_INTERVAL,
         default_transition: float = DEFAULT_TRANSITION,
+        pixel_count_option: int | None = None,
     ) -> None:
         self._instance = idealledinstance
         self._entry_id = entry_id
+        self._pixel_count_option = (
+            int(pixel_count_option) if pixel_count_option else None
+        )
         self._attr_supported_color_modes = {ColorMode.HS}
         self._attr_supported_features = LightEntityFeature.EFFECT | LightEntityFeature.TRANSITION
         #self._attr_brightness_step_pct = 10
@@ -151,6 +187,11 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, PATTERNS_CHANGED_SIGNAL, self.async_write_ha_state
+            )
+        )
         last = await self.async_get_last_state()
         if last is not None and last.state in (STATE_ON, STATE_OFF):
             self._desired_on = last.state == STATE_ON
@@ -241,6 +282,15 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
             ):
                 # Effect promises a pattern but no data survived to back it.
                 self._instance._effect = None
+        # The pixel_count option (per device) wins over the restored frame
+        # length; tell the controller once via LAMPN in the background.
+        if (
+            self._pixel_count_option is not None
+            and self._pixel_count_option != self._instance._pixel_count
+        ):
+            self._run_command(
+                lambda: self._instance.set_pixel_count(self._pixel_count_option)
+            )
         if self._resend_interval:
             self._enforce_task = self.hass.async_create_background_task(
                 self._enforce_loop(), f"ideal_led enforce {self._instance.mac}"
@@ -670,6 +720,40 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
     async def async_delete_pattern(self, name: str) -> None:
         """Handle ideal_led.delete_pattern."""
         self._instance.delete_pattern(name)
+        self.async_write_ha_state()
+
+    async def async_set_pixel_range(self, **kwargs) -> None:
+        """Handle ideal_led.set_pixel_range: paint a single LED range.
+
+        Flat fields so the service renders as a form in the HA UI. `from` is
+        a reserved word, hence the **kwargs access.
+        """
+        mode = kwargs.get("mode", "solid")
+        if mode not in PIXEL_MODES:
+            raise ValueError(f"mode must be one of {list(PIXEL_MODES)}, got '{mode}'")
+        speed = kwargs.get("speed", 50)
+        pixel_count = kwargs.get("pixel_count")
+        rle = kwargs.get("rle", True)
+        count = (
+            int(pixel_count) if pixel_count is not None else self._instance.pixel_count
+        )
+        entry = {
+            "from": kwargs["from"],
+            "to": kwargs.get("to", kwargs["from"]),
+            "color": kwargs.get("color", [255, 255, 255]),
+            "mode": mode,
+            "speed": speed,
+        }
+        assignments = self._pixel_assignments(
+            [entry], count, PIXEL_MODES[mode], speed
+        )
+        self._desired_on = True
+        self._in_sync = False
+        self._run_command(
+            lambda: self._instance.async_set_pixels(
+                assignments, mode=mode, speed=speed, pixel_count=pixel_count, rle=rle
+            )
+        )
         self.async_write_ha_state()
 
     async def async_update(self) -> None:

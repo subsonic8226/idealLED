@@ -138,6 +138,23 @@ data:
   fade/flash animations; solid patterns don't visibly change).
 - Solid colours and controller effects deactivate the showing pattern;
   re-apply the `Pattern: <name>` effect to bring it back.
+
+### Configuring patterns from the HA UI
+
+Besides the services, each device gets UI entities:
+
+- **`<name> Pattern`** (select): dropdown of all saved patterns; choosing one
+  applies it like the effect dropdown.
+- **`<name> Pattern name`** (text): the name the buttons below act on.
+- **`<name> Save Pattern`** / **`<name> Delete Pattern`** (buttons): save the
+  currently painted frame under that name, or delete the pattern.
+
+For painting single ranges without YAML, use the flat service
+`ideal_led.set_pixel_range` (`from`, `to`, `color`, `mode`, `speed`, ...) —
+its fields have selectors, so it renders as a form in Developer Tools and the
+automation editor. The strip's LED count can be set once per device in the
+integration options (`pixel_count`, default 100) instead of passing it in
+every service call.
 - A pattern's LED count is applied via a `LAMPN` packet when it differs from
   the strip's current count.
 - Limits: max 20 patterns per strip, names up to 64 characters, 1-255 LEDs per

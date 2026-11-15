@@ -9,7 +9,7 @@ from .idealled import IDEALLEDInstance
 import logging
 
 LOGGER = logging.getLogger(__name__)
-PLATFORMS = ["light", "number"]
+PLATFORMS = ["light", "number", "select", "text", "button"]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up from a config entry."""

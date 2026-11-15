@@ -143,3 +143,72 @@ delete_pattern:
       example: Advent
       selector:
         text:
+
+set_pixel_range:
+  name: Paint one LED range
+  description: >-
+    Paint a single LED range with one colour, mode and speed. Flat fields with
+    selectors, so this renders as a proper form in Developer Tools and the
+    automation editor (unlike the list-based set_pixels).
+  fields:
+    from:
+      name: First LED
+      required: true
+      description: First LED number (0-based).
+      example: 0
+      selector:
+        number:
+          min: 0
+          max: 254
+    to:
+      name: Last LED
+      required: false
+      description: Last LED number (inclusive, defaults to `from`).
+      example: 24
+      selector:
+        number:
+          min: 0
+          max: 254
+    color:
+      name: Color
+      required: false
+      description: RGB color (default white).
+      example: [255, 0, 0]
+      selector:
+        color_rgb:
+    mode:
+      name: Mode
+      required: false
+      description: Display mode of this range.
+      selector:
+        select:
+          options:
+            - solid
+            - fade
+            - flash
+    speed:
+      name: Speed
+      required: false
+      description: Speed for the fade and flash modes (1-100).
+      selector:
+        number:
+          min: 1
+          max: 100
+    pixel_count:
+      name: LED count
+      required: false
+      description: >-
+        Number of LEDs on the strip. Sent to the controller when it differs
+        from the configured count (integration options, default 100).
+      selector:
+        number:
+          min: 1
+          max: 255
+    rle:
+      name: Compression
+      required: false
+      description: >-
+        Compress runs of identical colours into a single collection
+        (recommended, much faster).
+      selector:
+        boolean:

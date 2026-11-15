@@ -289,6 +289,9 @@ class IDEALLEDInstance:
         self._pixel_frame_state: dict | None = None  # {"rle": bool} while active
         # Named patterns: name -> {"rle": bool, "pixels": [(r,g,b,mode,speed)]}
         self._patterns: dict[str, dict] = {}
+        # Name typed into the "Pattern name" text entity (used by the
+        # save/delete pattern buttons).
+        self.pattern_name_input: str = ""
 
         LOGGER.debug(
             f"Model information for device {self.name} : ModelNo {self._model}. MAC: {self._mac}. Delay: {self._delay}"
@@ -966,6 +969,15 @@ class IDEALLEDInstance:
         packet[8] = top
         packet[9] = bottom
         await self._write(packet)
+        self.set_pixel_count_local(count)
+
+    def set_pixel_count_local(self, count: int) -> None:
+        """Set the framebuffer size without sending LAMPN (e.g. from options)."""
+        count = int(count)
+        if not 1 <= count <= MAX_PIXEL_COUNT:
+            raise ValueError(
+                f"pixel_count must be between 1 and {MAX_PIXEL_COUNT}, got {count}"
+            )
         self._pixel_count = count
         if len(self._pixels) > count:
             self._pixels = self._pixels[:count]
