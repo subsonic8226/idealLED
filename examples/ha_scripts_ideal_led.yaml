@@ -171,6 +171,340 @@ script:
           pixel_count: "{{ pixel_count }}"
           rle: true
 
+  ideal_led_paint_segments:
+    alias: "iDeal LED: 102 LEDs segmentweise belegen"
+    description: >-
+      Belegt die Kette im Pixel-Modus auf einen Schlag: bis zu 6 Segmente
+      (from bis to) mit je eigener Farbe, Modus und Speed. Voreingestellt ist
+      die Aufteilung der 102 LEDs in 6 Segmente à 17 LEDs (0-16, 17-33, ...,
+      85-101) - direkt ausführen malt die ganze Kette. Segmente lassen sich
+      einzeln deaktivieren; leeres `to` malt nur die eine LED ab `from`.
+      Optional direkt als benanntes Pattern speichern.
+    icon: mdi:shape-plus
+    fields:
+      light_entity:
+        name: Licht
+        description: Die iDeal-LED-Kette
+        required: true
+        selector:
+          entity:
+            integration: ideal_led
+            domain: light
+      pixel_count:
+        name: LED-Anzahl
+        description: Anzahl LEDs auf der Kette (wird ans Gerät gesendet, wenn abweichend)
+        required: false
+        default: 102
+        selector:
+          number:
+            min: 1
+            max: 255
+      rle:
+        name: RLE-Kompression
+        required: false
+        default: true
+        selector:
+          boolean:
+      seg1_active:
+        name: Segment 1 aktiv
+        required: false
+        default: true
+        selector:
+          boolean:
+      seg1_from:
+        name: Segment 1 - erste LED
+        required: true
+        default: 0
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg1_to:
+        name: Segment 1 - letzte LED
+        description: inklusive, leer lassen = nur die eine LED ab `from`
+        required: false
+        default: 16
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg1_color:
+        name: Segment 1 - Farbe
+        required: false
+        default: [255, 0, 0]
+        selector:
+          color_rgb:
+      seg1_mode:
+        name: Segment 1 - Modus
+        required: false
+        default: solid
+        selector:
+          select:
+            options: [solid, fade, flash]
+      seg1_speed:
+        name: Segment 1 - Speed
+        description: nur für fade/flash (1-100)
+        required: false
+        default: 50
+        selector:
+          number:
+            min: 1
+            max: 100
+      seg2_active:
+        name: Segment 2 aktiv
+        required: false
+        default: true
+        selector:
+          boolean:
+      seg2_from:
+        name: Segment 2 - erste LED
+        required: true
+        default: 17
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg2_to:
+        name: Segment 2 - letzte LED
+        required: false
+        default: 33
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg2_color:
+        name: Segment 2 - Farbe
+        required: false
+        default: [255, 127, 0]
+        selector:
+          color_rgb:
+      seg2_mode:
+        name: Segment 2 - Modus
+        required: false
+        default: solid
+        selector:
+          select:
+            options: [solid, fade, flash]
+      seg2_speed:
+        name: Segment 2 - Speed
+        required: false
+        default: 50
+        selector:
+          number:
+            min: 1
+            max: 100
+      seg3_active:
+        name: Segment 3 aktiv
+        required: false
+        default: true
+        selector:
+          boolean:
+      seg3_from:
+        name: Segment 3 - erste LED
+        required: true
+        default: 34
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg3_to:
+        name: Segment 3 - letzte LED
+        required: false
+        default: 50
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg3_color:
+        name: Segment 3 - Farbe
+        required: false
+        default: [255, 255, 0]
+        selector:
+          color_rgb:
+      seg3_mode:
+        name: Segment 3 - Modus
+        required: false
+        default: solid
+        selector:
+          select:
+            options: [solid, fade, flash]
+      seg3_speed:
+        name: Segment 3 - Speed
+        required: false
+        default: 50
+        selector:
+          number:
+            min: 1
+            max: 100
+      seg4_active:
+        name: Segment 4 aktiv
+        required: false
+        default: true
+        selector:
+          boolean:
+      seg4_from:
+        name: Segment 4 - erste LED
+        required: true
+        default: 51
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg4_to:
+        name: Segment 4 - letzte LED
+        required: false
+        default: 67
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg4_color:
+        name: Segment 4 - Farbe
+        required: false
+        default: [0, 255, 0]
+        selector:
+          color_rgb:
+      seg4_mode:
+        name: Segment 4 - Modus
+        required: false
+        default: solid
+        selector:
+          select:
+            options: [solid, fade, flash]
+      seg4_speed:
+        name: Segment 4 - Speed
+        required: false
+        default: 50
+        selector:
+          number:
+            min: 1
+            max: 100
+      seg5_active:
+        name: Segment 5 aktiv
+        required: false
+        default: true
+        selector:
+          boolean:
+      seg5_from:
+        name: Segment 5 - erste LED
+        required: true
+        default: 68
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg5_to:
+        name: Segment 5 - letzte LED
+        required: false
+        default: 84
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg5_color:
+        name: Segment 5 - Farbe
+        required: false
+        default: [0, 0, 255]
+        selector:
+          color_rgb:
+      seg5_mode:
+        name: Segment 5 - Modus
+        required: false
+        default: solid
+        selector:
+          select:
+            options: [solid, fade, flash]
+      seg5_speed:
+        name: Segment 5 - Speed
+        required: false
+        default: 50
+        selector:
+          number:
+            min: 1
+            max: 100
+      seg6_active:
+        name: Segment 6 aktiv
+        required: false
+        default: true
+        selector:
+          boolean:
+      seg6_from:
+        name: Segment 6 - erste LED
+        required: true
+        default: 85
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg6_to:
+        name: Segment 6 - letzte LED
+        required: false
+        default: 101
+        selector:
+          number:
+            min: 0
+            max: 254
+      seg6_color:
+        name: Segment 6 - Farbe
+        required: false
+        default: [127, 0, 255]
+        selector:
+          color_rgb:
+      seg6_mode:
+        name: Segment 6 - Modus
+        required: false
+        default: solid
+        selector:
+          select:
+            options: [solid, fade, flash]
+      seg6_speed:
+        name: Segment 6 - Speed
+        required: false
+        default: 50
+        selector:
+          number:
+            min: 1
+            max: 100
+      save_as:
+        name: Als Pattern speichern unter
+        description: leer lassen = nicht speichern
+        required: false
+        default: ""
+        selector:
+          text:
+    sequence:
+      - alias: Pixel-Liste aus den aktivierten Segmenten bauen
+        variables:
+          pixels: >-
+            {{ [
+              {'from': seg1_from | int, 'to': (seg1_to if seg1_to is not none else seg1_from) | int, 'color': seg1_color, 'mode': seg1_mode, 'speed': seg1_speed | int} if seg1_active else none,
+              {'from': seg2_from | int, 'to': (seg2_to if seg2_to is not none else seg2_from) | int, 'color': seg2_color, 'mode': seg2_mode, 'speed': seg2_speed | int} if seg2_active else none,
+              {'from': seg3_from | int, 'to': (seg3_to if seg3_to is not none else seg3_from) | int, 'color': seg3_color, 'mode': seg3_mode, 'speed': seg3_speed | int} if seg3_active else none,
+              {'from': seg4_from | int, 'to': (seg4_to if seg4_to is not none else seg4_from) | int, 'color': seg4_color, 'mode': seg4_mode, 'speed': seg4_speed | int} if seg4_active else none,
+              {'from': seg5_from | int, 'to': (seg5_to if seg5_to is not none else seg5_from) | int, 'color': seg5_color, 'mode': seg5_mode, 'speed': seg5_speed | int} if seg5_active else none,
+              {'from': seg6_from | int, 'to': (seg6_to if seg6_to is not none else seg6_from) | int, 'color': seg6_color, 'mode': seg6_mode, 'speed': seg6_speed | int} if seg6_active else none
+            ] | select | list }}
+      - alias: Segmente auf die Kette malen
+        if: "{{ pixels | length > 0 }}"
+        service: ideal_led.set_pixels
+        target:
+          entity_id: "{{ light_entity }}"
+        data:
+          pixels: "{{ pixels }}"
+          pixel_count: "{{ pixel_count }}"
+          rle: "{{ rle }}"
+      - alias: Optional als Pattern speichern
+        if: "{{ save_as | length > 0 }}"
+        then:
+          - service: ideal_led.save_pattern
+            target:
+              entity_id: "{{ light_entity }}"
+            data:
+              name: "{{ save_as }}"
+              pixels: "{{ pixels }}"
+              pixel_count: "{{ pixel_count }}"
+              rle: "{{ rle }}"
+
   ideal_led_apply_pattern:
     alias: "iDeal LED: Pattern anwenden"
     description: Wendet ein gespeichertes Pattern per Namen an (z. B. aus einer Automation).
